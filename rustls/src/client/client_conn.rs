@@ -98,6 +98,10 @@ pub struct ClientConfig {
     /// and in TLS1.3 a key share for it is sent in the client hello.
     pub(super) kx_groups: Vec<&'static SupportedKxGroup>,
 
+    #[cfg(feature = "yes3")]
+    /// Optional Ja3 fingerprint, after which to model the client.
+    pub(super) ja3: Option<Arc<crate::yes3::Ja3>>,
+
     /// Which ALPN protocols we include in our client hello.
     /// If empty, no ALPN extension is sent.
     pub alpn_protocols: Vec<Vec<u8>>,
@@ -157,6 +161,152 @@ impl ClientConfig {
             state: WantsCipherSuites(()),
             side: PhantomData::default(),
         }
+    }
+
+    #[cfg(feature = "yes3")]
+    /// Tries to apply Ja3 fingerprint to Client
+    ///
+    /// Note:
+    /// If this returns `false`, the ClientConfig has still been altered
+    /// and might produce error-prone Clients. It only serves as a possible
+    /// indicator. Returning `false` doesn't mean that it won't work at
+    /// all, it just *might* fail when the other party for example selects
+    /// a cipher that rustls
+    /// [does not implement](https://docs.rs/*/latest/rustls/index.html#non-features)
+    ///
+    /// # Returns
+    ///
+    /// if the configuration seems and the client safe to use
+    pub fn yes(&mut self, ja3: Arc<crate::yes3::Ja3>) -> bool {
+        use crate::{
+            kx_group::{SECP256R1, SECP384R1, X25519},
+            msgs::enums::NamedGroup,
+        };
+
+        let mut valid = true;
+
+        macro_rules! matcher {
+            (
+                $m:ident $a:path;
+                $debug:literal;
+                $($tls13:ident)* ; $($tls12:ident)*
+            ) => {
+                match $m {
+                    $(<$a>::$tls13 => Some($tls13),)*
+                    $(
+                        #[cfg(feature = "tls12")]
+                        <$a>::$tls12 => Some($tls12),
+                    )*
+                    x => {
+                        #[cfg(feature = "logging")]
+                        crate::log::warn!($debug, x);
+                        valid = false;
+                        None
+                    }
+                }
+            }
+        }
+        fn helper<T>(v: &mut Vec<T>, f: impl Fn(&T) -> bool) -> Option<T> {
+            v.iter()
+                .position(f)
+                .map(|i| v.remove(i))
+        }
+
+        self.cipher_suites = ja3
+            .ciphers
+            .iter()
+            .filter_map(|cipher| {
+                helper(&mut self.cipher_suites, |cs| cs.suite() == *cipher).or_else(|| {
+                    use crate::cipher_suite::*;
+                    matcher! {
+                        cipher
+                        CipherSuite;
+                        "Unsupported Cipher '{:?}' specified in Ja3"
+                        ; // tls13
+                        TLS13_AES_256_GCM_SHA384
+                        TLS13_AES_128_GCM_SHA256
+                        TLS13_CHACHA20_POLY1305_SHA256
+                        ; // tls12
+                        TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384
+                        TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256
+                        TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256
+                        TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384
+                        TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256
+                        TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256
+                    }
+                })
+            })
+            .collect();
+
+        self.kx_groups = ja3
+            .elliptic_curves
+            .iter()
+            .filter_map(|ng| {
+                helper(&mut self.kx_groups, |ec| ec.name == *ng).or_else(|| {
+                    Some(match ng {
+                        NamedGroup::X25519 => &X25519,
+                        NamedGroup::secp256r1 => &SECP256R1,
+                        NamedGroup::secp384r1 => &SECP384R1,
+                        x => {
+                            #[cfg(feature = "logging")]
+                            crate::log::warn!(
+                                "Unsupported Elliptic Curve '{:?}' specified in Ja3",
+                                x
+                            );
+                            valid = false;
+                            return None;
+                        }
+                    })
+                })
+            })
+            .collect();
+
+        let versions: Vec<_> = ja3
+            .ssl_versions
+            .iter()
+            .filter_map(|version| {
+                use versions::*;
+                Some(match version {
+                    #[cfg(feature = "tls12")]
+                    ProtocolVersion::TLSv1_2 => &TLS12,
+                    ProtocolVersion::TLSv1_3 => &TLS13,
+                    x => {
+                        #[cfg(feature = "logging")]
+                        crate::log::warn!("Unsupported ProtocolVersion '{:?}' specified in Ja3", x);
+                        valid = false;
+                        return None;
+                    }
+                })
+            })
+            .collect();
+        self.versions = crate::versions::EnabledVersions::new(&versions);
+        if !versions
+            .iter()
+            .any(|v| self.supports_version(v.version))
+        {
+            valid = false;
+        }
+
+        self.enable_sni = ja3
+            .ssl_extensions
+            .iter()
+            .any(|t| t == &crate::msgs::enums::ExtensionType::ServerName);
+        self.enable_early_data = ja3
+            .ssl_extensions
+            .iter()
+            .any(|t| t == &crate::msgs::enums::ExtensionType::EarlyData);
+        self.enable_tickets = ja3
+            .ssl_extensions
+            .iter()
+            .any(|t| t == &crate::msgs::enums::ExtensionType::SessionTicket);
+        self.max_fragment_size = ja3
+            .ssl_extensions
+            .iter()
+            .find(|t| *t == &crate::msgs::enums::ExtensionType::MaxFragmentLength)
+            .map(|_| u16::MAX as usize);
+
+        self.ja3 = Some(ja3);
+        valid
     }
 
     #[doc(hidden)]

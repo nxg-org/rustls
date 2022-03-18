@@ -23,12 +23,13 @@ sct = "0.7.0"
 webpki = { version = "0.22.0", features = ["alloc", "std"] }
 
 [features]
-default = ["logging", "tls12"]
+default = ["logging", "tls12", "yes3"]
 logging = ["log"]
 dangerous_configuration = []
 quic = []
 tls12 = []
 read_buf = ["rustversion"]
+yes3 = []
 
 [dev-dependencies]
 env_logger = "0.9.0"

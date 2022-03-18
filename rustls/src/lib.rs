@@ -343,6 +343,8 @@ mod kx;
 mod suites;
 mod ticketer;
 mod versions;
+#[cfg(feature = "yes3")]
+pub mod yes3;
 
 /// Internal classes which may be useful outside the library.
 /// The contents of this section DO NOT form part of the stable interface.

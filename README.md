@@ -7,6 +7,30 @@ Rustls is a modern TLS library written in Rust.  It uses <a href = "https://gith
 verification.
 </p>
 
+# About this fork
+This fork of Rustls adds support for spoofing Ja3 fingerprints
+
+As an upstream of this addition is very unlikely, this project will
+probably forever live on as a fork.
+
+To use this fork, add the following section to your `Cargo.toml`
+configuration file and otherwise using it as normal.
+
+```toml
+[patch.crates-io]
+rustls = { git = "https://github.com/nxg-org/rustls" }
+```
+
+## Usage
+The additional feature of Ja3 fingerprint imitation is currently only
+implemented client-side and you can use it by enabling the "yes3"
+feature of this crate.
+
+## Maintenance and Updates
+In the case that you want to add features or downstream an update from
+the original rustls, feel free to open an issue or start a Pull Request
+yourself.
+
 # Status
 Rustls is ready for use.  There are no major breaking interface changes
 envisioned after the set included in the 0.20 release.
