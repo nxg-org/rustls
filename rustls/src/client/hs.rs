@@ -263,16 +263,6 @@ fn emit_client_hello_for_retry(
             None
         };
         let mut e_exts = extra_exts.clone();
-        // let mut supported_encryption_schemes = Some(
-        //     config
-        //         .cipher_suites
-        //         .iter()
-        //         .flat_map(|a| match a {
-        //             crate::SupportedCipherSuite::Tls12(a) => a.sign.to_vec(),
-        //             crate::SupportedCipherSuite::Tls13(_) => vec![],
-        //         })
-        //         .collect(),
-        // );
 
         let exts = ja3
             .ssl_extensions
