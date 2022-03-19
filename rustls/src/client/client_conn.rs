@@ -166,18 +166,24 @@ impl ClientConfig {
     #[cfg(feature = "yes3")]
     /// Tries to apply Ja3 fingerprint to Client
     ///
-    /// Note:
-    /// If this returns `false`, the ClientConfig has still been altered
-    /// and might produce error-prone Clients. It only serves as a possible
-    /// indicator. Returning `false` doesn't mean that it won't work at
-    /// all, it just *might* fail when the other party for example selects
-    /// a cipher that rustls
-    /// [does not implement](https://docs.rs/*/latest/rustls/index.html#non-features)
-    ///
     /// # Returns
     ///
-    /// if the configuration seems and the client safe to use
-    pub fn yes(&mut self, ja3: Arc<crate::yes3::Ja3>) -> bool {
+    /// `Some(true)` if the supplied Ja3 has been applied to the ClientConfig
+    /// and will definitely work.
+    ///
+    /// `Some(false)` if the supplied Ja3 contains possibly unsupported
+    /// CipherSuites but there being a chance of the remote choosing a
+    /// supported combination of ProtocolVersion and CipherSuite.
+    ///
+    /// **NOTE**: If relying on safe behaviour, discard any ClientConfig
+    /// that was altered by calling this method. It is not safe to use
+    /// anymore and might fail requests or even `panic!`. For a reasoning
+    /// why the unsupported CipherSuites aren't just implemented, take a
+    /// look at [this](https://docs.rs/*/latest/rustls/index.html#non-features)
+    ///
+    /// `None` if no possible combination of CipherSuites and supported
+    /// ProtocolVersions exists.
+    pub fn yes(&mut self, ja3: Arc<crate::yes3::Ja3>) -> Option<bool> {
         use crate::{
             kx_group::{SECP256R1, SECP384R1, X25519},
             msgs::enums::NamedGroup,
@@ -284,7 +290,11 @@ impl ClientConfig {
             .iter()
             .any(|v| self.supports_version(v.version))
         {
-            valid = false;
+            #[cfg(feature = "logging")]
+            crate::log::error!(
+                "Ja3 unsupported because of choice of CipherSuites and ProtocolVersions"
+            );
+            return None;
         }
 
         self.enable_sni = ja3
@@ -305,8 +315,20 @@ impl ClientConfig {
             .find(|t| *t == &crate::msgs::enums::ExtensionType::MaxFragmentLength)
             .map(|_| u16::MAX as usize);
 
+        if ja3
+            .ssl_extensions
+            .contains(&crate::msgs::enums::ExtensionType::ALProtocolNegotiation)
+            && self.alpn_protocols.is_empty()
+        {
+            #[cfg(feature = "logging")]
+            crate::log::error!(
+                "Ja3: ALPN SSL Extension specified but no alpn_protocols provided in configuration"
+            );
+            return None;
+        }
+
         self.ja3 = Some(ja3);
-        valid
+        Some(valid)
     }
 
     #[doc(hidden)]
