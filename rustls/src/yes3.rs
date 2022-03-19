@@ -72,6 +72,13 @@ impl FromStr for Ja3 {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let mut c = s.splitn(5, ',');
         let parts: [&str; 5] = <[(); 5]>::default().map(|_| c.next().unwrap_or(""));
+        if parts[2].contains("10") && parts[3].is_empty() {
+            return Err(Error);
+        }
+        if parts[2].contains("11") && parts[4].is_empty() {
+            return Err(Error);
+        }
+        
         Ok(Self {
             ssl_versions: from_str!(u16; parts[0])?,
             ciphers: from_str!(u16; parts[1])?,
