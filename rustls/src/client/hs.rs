@@ -263,124 +263,117 @@ fn emit_client_hello_for_retry(
             None
         };
         let mut e_exts = extra_exts.clone();
-        let mut supported_encryption_schemes = Some(
-            config
-                .cipher_suites
-                .iter()
-                .flat_map(|a| match a {
-                    crate::SupportedCipherSuite::Tls12(a) => a.sign.to_vec(),
-                    crate::SupportedCipherSuite::Tls13(_) => vec![],
-                })
-                .collect(),
-        );
+        // let mut supported_encryption_schemes = Some(
+        //     config
+        //         .cipher_suites
+        //         .iter()
+        //         .flat_map(|a| match a {
+        //             crate::SupportedCipherSuite::Tls12(a) => a.sign.to_vec(),
+        //             crate::SupportedCipherSuite::Tls13(_) => vec![],
+        //         })
+        //         .collect(),
+        // );
 
         let exts = ja3
             .ssl_extensions
             .iter()
-            .filter_map(|ext| {
+            .map(|ext| -> Result<ClientExtension, Error> {
                 if let Some(e) = extra_exts
                     .iter()
                     .position(|e| e.get_type() == *ext)
                     .map(|i| e_exts.remove(i))
                 {
-                    return Some(Ok(e));
+                    return Ok(e);
                 }
                 use ExtensionType::*;
-                Some(match ext {
-                    ServerName if config.enable_sni => match server_name.for_sni() {
-                        Some(sni_name) => Ok(ClientExtension::make_sni(sni_name)),
-                        None => Err(Error::General(
-                            "Couldn't generate DnsNameRef for server_name".to_string(),
-                        )),
-                    },
-                    StatusRequest => Ok(ClientExtension::CertificateStatusRequest(
+                Ok(match ext {
+                    ServerName if config.enable_sni => {
+                        ClientExtension::make_sni(server_name.for_sni().unwrap())
+                    }
+                    StatusRequest => ClientExtension::CertificateStatusRequest(
                         CertificateStatusRequest::build_ocsp(),
-                    )),
-                    EllipticCurves => Ok(ClientExtension::NamedGroups(ja3.elliptic_curves.clone())),
-                    ECPointFormats => Ok(ClientExtension::ECPointFormats(
-                        ja3.elliptic_curve_point_formats.clone(),
-                    )),
-                    SignatureAlgorithms => match supported_encryption_schemes.take() {
-                        Some(supported_encryption_schemes) => Ok(
-                            ClientExtension::SignatureAlgorithms(supported_encryption_schemes),
-                        ),
-                        None => Err(Error::General(
-                            "SignatureAlgorithms specified twice in ja3".to_string(),
-                        )),
-                    },
+                    ),
+                    EllipticCurves => ClientExtension::NamedGroups(ja3.elliptic_curves.clone()),
+                    ECPointFormats => {
+                        ClientExtension::ECPointFormats(ja3.elliptic_curve_point_formats.clone())
+                    }
+                    SignatureAlgorithms => ClientExtension::SignatureAlgorithms(
+                        config
+                            .cipher_suites
+                            .iter()
+                            .flat_map(|a| match a {
+                                crate::SupportedCipherSuite::Tls12(a) => a.sign.to_vec(),
+                                crate::SupportedCipherSuite::Tls13(_) => vec![],
+                            })
+                            .collect(),
+                    ),
                     ALProtocolNegotiation => {
-                        Ok(ClientExtension::Protocols(ProtocolNameList::from_slices(
+                        ClientExtension::Protocols(ProtocolNameList::from_slices(
                             &config
                                 .alpn_protocols
                                 .iter()
                                 .map(|proto| &proto[..])
                                 .collect::<Vec<_>>(),
-                        )))
+                        ))
                     }
-                    SCT => Ok(ClientExtension::SignedCertificateTimestampRequest),
-                    Padding => Ok(ClientExtension::Unknown(
-                        crate::msgs::handshake::UnknownExtension {
-                            typ: Padding,
-                            payload: Payload::new([0, 0]),
-                        },
-                    )),
-                    ExtendedMasterSecret => Ok(ClientExtension::ExtendedMasterSecretRequest),
-                    SessionTicket => Ok(ClientExtension::SessionTicket(match ticket.is_empty() {
+                    SCT => ClientExtension::SignedCertificateTimestampRequest,
+                    Padding => ClientExtension::Unknown(crate::msgs::handshake::UnknownExtension {
+                        typ: Padding,
+                        payload: Payload::new([0, 0]),
+                    }),
+                    ExtendedMasterSecret => ClientExtension::ExtendedMasterSecretRequest,
+                    SessionTicket => ClientExtension::SessionTicket(match ticket.is_empty() {
                         true => ClientSessionTicket::Request,
                         false => ClientSessionTicket::Offer(Payload(ticket.clone())),
-                    })),
-                    PreSharedKey => Ok(ClientExtension::PresharedKey(
-                        crate::msgs::handshake::PresharedKeyOffer {
+                    }),
+                    PreSharedKey => {
+                        ClientExtension::PresharedKey(crate::msgs::handshake::PresharedKeyOffer {
                             identities: vec![],
                             binders: vec![],
-                        },
-                    )),
-                    PSKKeyExchangeModes => Ok(ClientExtension::PresharedKeyModes(vec![
-                        PSKKeyExchangeMode::PSK_DHE_KE,
-                    ])),
-                    EarlyData => Ok(ClientExtension::EarlyData),
-                    SupportedVersions => {
-                        Ok(ClientExtension::SupportedVersions(ja3.ssl_versions.clone()))
+                        })
                     }
-                    Cookie => Ok(ClientExtension::Cookie(
+                    PSKKeyExchangeModes => {
+                        ClientExtension::PresharedKeyModes(vec![PSKKeyExchangeMode::PSK_DHE_KE])
+                    }
+                    EarlyData => ClientExtension::EarlyData,
+                    SupportedVersions => {
+                        ClientExtension::SupportedVersions(ja3.ssl_versions.clone())
+                    }
+                    Cookie => ClientExtension::Cookie(
                         match retryreq.and_then(HelloRetryRequest::get_cookie) {
                             Some(cookie) => cookie.clone(),
                             None => crate::msgs::base::PayloadU16(vec![]),
                         },
-                    )),
-                    KeyShare => Ok(ClientExtension::KeyShare(
-                        if let Some(key_share) = &key_share {
-                            vec![KeyShareEntry::new(
-                                key_share.group(),
-                                key_share.pubkey.as_ref(),
-                            )]
-                        } else {
-                            vec![]
-                        },
-                    )),
-                    RenegotiationInfo => Ok(ClientExtension::Unknown(
-                        crate::msgs::handshake::UnknownExtension {
+                    ),
+                    KeyShare => ClientExtension::KeyShare(if let Some(key_share) = &key_share {
+                        vec![KeyShareEntry::new(
+                            key_share.group(),
+                            key_share.pubkey.as_ref(),
+                        )]
+                    } else {
+                        vec![]
+                    }),
+                    RenegotiationInfo => {
+                        ClientExtension::Unknown(crate::msgs::handshake::UnknownExtension {
                             typ: RenegotiationInfo,
                             payload: Payload::new(vec![0u8]),
-                        },
-                    )),
-                    Heartbeat => Ok(ClientExtension::Unknown(
-                        crate::msgs::handshake::UnknownExtension {
+                        })
+                    }
+                    Heartbeat => {
+                        ClientExtension::Unknown(crate::msgs::handshake::UnknownExtension {
                             typ: Heartbeat,
                             payload: Payload::new(vec![
                                 crate::msgs::enums::HeartbeatMode::PeerNotAllowedToSend.get_u8(),
                             ]),
-                        },
-                    )),
+                        })
+                    }
                     Unknown(n) => {
                         #[cfg(feature = "logging")]
                         crate::log::warn!("Unknown ExtensionType with id '{}' specified", n);
-                        Ok(ClientExtension::Unknown(
-                            crate::msgs::handshake::UnknownExtension {
-                                typ: Unknown(*n),
-                                payload: Payload::new(vec![]),
-                            },
-                        ))
+                        ClientExtension::Unknown(crate::msgs::handshake::UnknownExtension {
+                            typ: Unknown(*n),
+                            payload: Payload::new(vec![]),
+                        })
                         // return None;
                     }
                     x => {
@@ -388,7 +381,12 @@ fn emit_client_hello_for_retry(
                         crate::log::warn!("Non-clientside ExtensionType '{:?}' specified", x);
                         // probably invalid extension specified
                         // todo decide what to do here
-                        return None;
+                        // return None;
+                        // let's handle it like any other unknown one for now
+                        ClientExtension::Unknown(crate::msgs::handshake::UnknownExtension {
+                            typ: *x,
+                            payload: Payload::new(vec![]),
+                        })
                     }
                 })
             })
