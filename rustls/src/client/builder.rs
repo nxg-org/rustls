@@ -173,6 +173,7 @@ impl ConfigBuilder<ClientConfig, WantsClientCert> {
         ClientConfig {
             cipher_suites: self.state.cipher_suites,
             kx_groups: self.state.kx_groups,
+            #[cfg(feature = "yes3")]
             ja3: None,
             alpn_protocols: Vec::new(),
             session_storage: handy::ClientSessionMemoryCache::new(256),

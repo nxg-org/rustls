@@ -188,7 +188,8 @@ fn emit_client_hello_for_retry(
     retryreq: Option<&HelloRetryRequest>,
     server_name: ServerName,
     key_share: Option<kx::KeyExchange>,
-    mut extra_exts: Vec<ClientExtension>,
+    #[cfg(feature = "yes3")] mut extra_exts: Vec<ClientExtension>,
+    #[cfg(not(feature = "yes3"))] extra_exts: Vec<ClientExtension>,
     may_send_sct_list: bool,
     suite: Option<SupportedCipherSuite>,
 ) -> NextStateOrError {
@@ -227,260 +228,270 @@ fn emit_client_hello_for_retry(
     }
 
     // treat connection differently if trying to spoof a Ja3 fingerprint
-    let (fill_in_binder, exts) = if let Some(ja3) = &config.ja3 {
-        let tls_client_session = if support_tls13
-            && config.enable_tickets
-            && resume_version == ProtocolVersion::TLSv1_3
-            && !ticket.is_empty()
-        {
-            resuming_session
-                .as_ref()
-                .and_then(|resuming| match (suite, resuming.tls13()) {
-                    (Some(suite), Some(resuming)) => {
-                        suite
-                            .tls13()?
-                            .can_resume_from(resuming.suite())?;
-                        Some(resuming)
-                    }
-                    (None, Some(resuming)) => Some(resuming),
-                    _ => None,
-                })
-                .map(|resuming| {
-                    let mut overwrite_exts = vec![];
-                    tls13::prepare_resumption(
-                        &config,
-                        cx,
-                        ticket.clone(),
-                        &resuming,
-                        &mut overwrite_exts,
-                        retryreq.is_some(),
-                    );
-                    overwrite_exts.append(&mut extra_exts);
-                    extra_exts = overwrite_exts;
-                    resuming
-                })
-        } else {
-            None
-        };
-        let mut e_exts = extra_exts.clone();
-
-        let exts = ja3
-            .ssl_extensions
-            .iter()
-            .map(|ext| -> Result<ClientExtension, Error> {
-                if let Some(e) = extra_exts
-                    .iter()
-                    .position(|e| e.get_type() == *ext)
-                    .map(|i| e_exts.remove(i))
-                {
-                    return Ok(e);
-                }
-                use ExtensionType::*;
-                Ok(match ext {
-                    ServerName if config.enable_sni => {
-                        ClientExtension::make_sni(server_name.for_sni().unwrap())
-                    }
-                    StatusRequest => ClientExtension::CertificateStatusRequest(
-                        CertificateStatusRequest::build_ocsp(),
-                    ),
-                    EllipticCurves => ClientExtension::NamedGroups(ja3.elliptic_curves.clone()),
-                    ECPointFormats => {
-                        ClientExtension::ECPointFormats(ja3.elliptic_curve_point_formats.clone())
-                    }
-                    SignatureAlgorithms => ClientExtension::SignatureAlgorithms(
-                        config
-                            .cipher_suites
-                            .iter()
-                            .flat_map(|a| match a {
-                                crate::SupportedCipherSuite::Tls12(a) => a.sign.to_vec(),
-                                crate::SupportedCipherSuite::Tls13(_) => vec![],
-                            })
-                            .collect(),
-                    ),
-                    ALProtocolNegotiation => {
-                        ClientExtension::Protocols(ProtocolNameList::from_slices(
-                            &config
-                                .alpn_protocols
-                                .iter()
-                                .map(|proto| &proto[..])
-                                .collect::<Vec<_>>(),
-                        ))
-                    }
-                    SCT => ClientExtension::SignedCertificateTimestampRequest,
-                    Padding => ClientExtension::Unknown(crate::msgs::handshake::UnknownExtension {
-                        typ: Padding,
-                        payload: Payload::new([0, 0]),
-                    }),
-                    ExtendedMasterSecret => ClientExtension::ExtendedMasterSecretRequest,
-                    SessionTicket => ClientExtension::SessionTicket(match ticket.is_empty() {
-                        true => ClientSessionTicket::Request,
-                        false => ClientSessionTicket::Offer(Payload(ticket.clone())),
-                    }),
-                    PreSharedKey => {
-                        ClientExtension::PresharedKey(crate::msgs::handshake::PresharedKeyOffer {
-                            identities: vec![],
-                            binders: vec![],
-                        })
-                    }
-                    PSKKeyExchangeModes => {
-                        ClientExtension::PresharedKeyModes(vec![PSKKeyExchangeMode::PSK_DHE_KE])
-                    }
-                    EarlyData => ClientExtension::EarlyData,
-                    SupportedVersions => {
-                        ClientExtension::SupportedVersions(ja3.ssl_versions.clone())
-                    }
-                    // todo add real cookie implementation, so this won't be detected when always
-                    // sending only an empty field
-                    Cookie => ClientExtension::Cookie(
-                        match retryreq.and_then(HelloRetryRequest::get_cookie) {
-                            Some(cookie) => cookie.clone(),
-                            None => crate::msgs::base::PayloadU16(vec![]),
-                        },
-                    ),
-                    KeyShare => ClientExtension::KeyShare(if let Some(key_share) = &key_share {
-                        vec![KeyShareEntry::new(
-                            key_share.group(),
-                            key_share.pubkey.as_ref(),
-                        )]
-                    } else {
-                        vec![]
-                    }),
-                    RenegotiationInfo => {
-                        ClientExtension::Unknown(crate::msgs::handshake::UnknownExtension {
-                            typ: RenegotiationInfo,
-                            payload: Payload::new(vec![0u8]),
-                        })
-                    }
-                    Heartbeat => {
-                        ClientExtension::Unknown(crate::msgs::handshake::UnknownExtension {
-                            typ: Heartbeat,
-                            payload: Payload::new(vec![
-                                crate::msgs::enums::HeartbeatMode::PeerNotAllowedToSend.get_u8(),
-                            ]),
-                        })
-                    }
-                    Unknown(n) => {
-                        #[cfg(feature = "logging")]
-                        crate::log::warn!("Unknown ExtensionType with id '{}' specified", n);
-                        ClientExtension::Unknown(crate::msgs::handshake::UnknownExtension {
-                            typ: Unknown(*n),
-                            payload: Payload::new(vec![]),
-                        })
-                    }
-                    x => {
-                        #[cfg(feature = "logging")]
-                        crate::log::warn!("Probably non-clientside ExtensionType '{:?}' specified", x);
-                        // let's handle it like any other unknown one for now
-                        ClientExtension::Unknown(crate::msgs::handshake::UnknownExtension {
-                            typ: *x,
-                            payload: Payload::new(vec![]),
-                        })
-                    }
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-
-        (tls_client_session, exts)
-    } else {
-        let mut exts = vec![
-            ClientExtension::SupportedVersions(supported_versions),
-            ClientExtension::ECPointFormats(ECPointFormatList::supported()),
-            ClientExtension::NamedGroups(
-                config
-                    .kx_groups
-                    .iter()
-                    .map(|skxg| skxg.name)
-                    .collect(),
-            ),
-            ClientExtension::SignatureAlgorithms(
-                config
-                    .verifier
-                    .supported_verify_schemes(),
-            ),
-            ClientExtension::ExtendedMasterSecretRequest,
-            ClientExtension::CertificateStatusRequest(CertificateStatusRequest::build_ocsp()),
-        ];
-
-        if let (Some(sni_name), true) = (server_name.for_sni(), config.enable_sni) {
-            exts.push(ClientExtension::make_sni(sni_name));
-        }
-
-        if may_send_sct_list {
-            exts.push(ClientExtension::SignedCertificateTimestampRequest);
-        }
-
-        if let Some(key_share) = &key_share {
-            debug_assert!(support_tls13);
-            let key_share = KeyShareEntry::new(key_share.group(), key_share.pubkey.as_ref());
-            exts.push(ClientExtension::KeyShare(vec![key_share]));
-        }
-
-        if let Some(cookie) = retryreq.and_then(HelloRetryRequest::get_cookie) {
-            exts.push(ClientExtension::Cookie(cookie.clone()));
-        }
-
-        if support_tls13 && config.enable_tickets {
-            // We could support PSK_KE here too. Such connections don't
-            // have forward secrecy, and are similar to TLS1.2 resumption.
-            let psk_modes = vec![PSKKeyExchangeMode::PSK_DHE_KE];
-            exts.push(ClientExtension::PresharedKeyModes(psk_modes));
-        }
-
-        if !config.alpn_protocols.is_empty() {
-            exts.push(ClientExtension::Protocols(ProtocolNameList::from_slices(
-                &config
-                    .alpn_protocols
-                    .iter()
-                    .map(|proto| &proto[..])
-                    .collect::<Vec<_>>(),
-            )));
-        }
-
-        // Extra extensions must be placed before the PSK extension
-        exts.extend(extra_exts.iter().cloned());
-
-        let tls_client_session = if support_tls13
-            && config.enable_tickets
-            && resume_version == ProtocolVersion::TLSv1_3
-            && !ticket.is_empty()
-        {
-            resuming_session
-                .as_ref()
-                .and_then(|resuming| match (suite, resuming.tls13()) {
-                    (Some(suite), Some(resuming)) => {
-                        suite
-                            .tls13()?
-                            .can_resume_from(resuming.suite())?;
-                        Some(resuming)
-                    }
-                    (None, Some(resuming)) => Some(resuming),
-                    _ => None,
-                })
-                .map(|resuming| {
-                    tls13::prepare_resumption(
-                        &config,
-                        cx,
-                        ticket,
-                        &resuming,
-                        &mut exts,
-                        retryreq.is_some(),
-                    );
-                    resuming
-                })
-        } else if config.enable_tickets {
-            // If we have a ticket, include it.  Otherwise, request one.
-            if ticket.is_empty() {
-                exts.push(ClientExtension::SessionTicket(ClientSessionTicket::Request));
+    #[allow(clippy::never_loop)]
+    let (fill_in_binder, exts) = loop {
+        #[cfg(feature = "yes3")]
+        if let Some(ja3) = &config.ja3 {
+            let tls_client_session = if support_tls13
+                && config.enable_tickets
+                && resume_version == ProtocolVersion::TLSv1_3
+                && !ticket.is_empty()
+            {
+                resuming_session
+                    .as_ref()
+                    .and_then(|resuming| match (suite, resuming.tls13()) {
+                        (Some(suite), Some(resuming)) => {
+                            suite
+                                .tls13()?
+                                .can_resume_from(resuming.suite())?;
+                            Some(resuming)
+                        }
+                        (None, Some(resuming)) => Some(resuming),
+                        _ => None,
+                    })
+                    .map(|resuming| {
+                        let mut overwrite_exts = vec![];
+                        tls13::prepare_resumption(
+                            &config,
+                            cx,
+                            ticket.clone(),
+                            &resuming,
+                            &mut overwrite_exts,
+                            retryreq.is_some(),
+                        );
+                        overwrite_exts.append(&mut extra_exts);
+                        extra_exts = overwrite_exts;
+                        resuming
+                    })
             } else {
-                exts.push(ClientExtension::SessionTicket(ClientSessionTicket::Offer(
-                    Payload::new(ticket),
+                None
+            };
+            let mut e_exts = extra_exts.clone();
+
+            let exts = ja3
+                .ssl_extensions
+                .iter()
+                .map(|ext| -> Result<ClientExtension, Error> {
+                    if let Some(e) = extra_exts
+                        .iter()
+                        .position(|e| e.get_type() == *ext)
+                        .map(|i| e_exts.remove(i))
+                    {
+                        return Ok(e);
+                    }
+                    use ClientExtension::*;
+                    use crate::msgs::handshake::UnknownExtension;
+                    Ok(match ext {
+                        ExtensionType::ServerName if config.enable_sni => {
+                            ClientExtension::make_sni(server_name.for_sni().unwrap())
+                        }
+                        ExtensionType::StatusRequest => CertificateStatusRequest(
+                            crate::client::hs::CertificateStatusRequest::build_ocsp(),
+                        ),
+                        ExtensionType::EllipticCurves => NamedGroups(ja3.elliptic_curves.clone()),
+                        ExtensionType::ECPointFormats => {
+                            ECPointFormats(ja3.elliptic_curve_point_formats.clone())
+                        }
+                        ExtensionType::SignatureAlgorithms => SignatureAlgorithms(
+                            config
+                                .cipher_suites
+                                .iter()
+                                .flat_map(|a| match a {
+                                    crate::SupportedCipherSuite::Tls12(a) => a.sign.to_vec(),
+                                    crate::SupportedCipherSuite::Tls13(_) => vec![],
+                                })
+                                .collect(),
+                        ),
+                        ExtensionType::ALProtocolNegotiation => {
+                            Protocols(ProtocolNameList::from_slices(
+                                &config
+                                    .alpn_protocols
+                                    .iter()
+                                    .map(|proto| &proto[..])
+                                    .collect::<Vec<_>>(),
+                            ))
+                        }
+                        ExtensionType::SCT => SignedCertificateTimestampRequest,
+                        ExtensionType::Padding => {
+                            Unknown(UnknownExtension {
+                                typ: ExtensionType::Padding,
+                                payload: Payload::new([0, 0]),
+                            })
+                        }
+                        ExtensionType::ExtendedMasterSecret => ExtendedMasterSecretRequest,
+                        ExtensionType::SessionTicket => SessionTicket(match ticket.is_empty() {
+                            true => ClientSessionTicket::Request,
+                            false => ClientSessionTicket::Offer(Payload(ticket.clone())),
+                        }),
+                        ExtensionType::PreSharedKey => {
+                            PresharedKey(crate::msgs::handshake::PresharedKeyOffer {
+                                identities: vec![],
+                                binders: vec![],
+                            })
+                        }
+                        ExtensionType::PSKKeyExchangeModes => {
+                            PresharedKeyModes(vec![PSKKeyExchangeMode::PSK_DHE_KE])
+                        }
+                        ExtensionType::EarlyData => EarlyData,
+                        ExtensionType::SupportedVersions => {
+                            SupportedVersions(ja3.ssl_versions.clone())
+                        }
+                        // todo add real cookie implementation, so this won't be detected when always
+                        // sending only an empty field
+                        ExtensionType::Cookie => {
+                            Cookie(match retryreq.and_then(HelloRetryRequest::get_cookie) {
+                                Some(cookie) => cookie.clone(),
+                                None => crate::msgs::base::PayloadU16(vec![]),
+                            })
+                        }
+                        ExtensionType::KeyShare => KeyShare(if let Some(key_share) = &key_share {
+                            vec![KeyShareEntry::new(
+                                key_share.group(),
+                                key_share.pubkey.as_ref(),
+                            )]
+                        } else {
+                            vec![]
+                        }),
+                        ExtensionType::RenegotiationInfo => {
+                            Unknown(UnknownExtension {
+                                typ: ExtensionType::RenegotiationInfo,
+                                payload: Payload::new(vec![0u8]),
+                            })
+                        }
+                        ExtensionType::Heartbeat => {
+                            Unknown(UnknownExtension {
+                                typ: ExtensionType::Heartbeat,
+                                payload: Payload::new(vec![
+                                    crate::msgs::enums::HeartbeatMode::PeerNotAllowedToSend
+                                        .get_u8(),
+                                ]),
+                            })
+                        }
+                        ExtensionType::Unknown(n) => {
+                            #[cfg(feature = "logging")]
+                            crate::log::warn!("Unknown ExtensionType with id '{}' specified", n);
+                            Unknown(UnknownExtension {
+                                typ: ExtensionType::Unknown(*n),
+                                payload: Payload::new(vec![]),
+                            })
+                        }
+                        x => {
+                            #[cfg(feature = "logging")]
+                            crate::log::warn!(
+                                "Probably non-clientside ExtensionType '{:?}' specified",
+                                x
+                            );
+                            // let's handle it like any other unknown one for now
+                            Unknown(UnknownExtension {
+                                typ: *x,
+                                payload: Payload::new(vec![]),
+                            })
+                        }
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+
+            break (tls_client_session, exts);
+        };
+        {
+            let mut exts = vec![
+                ClientExtension::SupportedVersions(supported_versions),
+                ClientExtension::ECPointFormats(ECPointFormatList::supported()),
+                ClientExtension::NamedGroups(
+                    config
+                        .kx_groups
+                        .iter()
+                        .map(|skxg| skxg.name)
+                        .collect(),
+                ),
+                ClientExtension::SignatureAlgorithms(
+                    config
+                        .verifier
+                        .supported_verify_schemes(),
+                ),
+                ClientExtension::ExtendedMasterSecretRequest,
+                ClientExtension::CertificateStatusRequest(CertificateStatusRequest::build_ocsp()),
+            ];
+
+            if let (Some(sni_name), true) = (server_name.for_sni(), config.enable_sni) {
+                exts.push(ClientExtension::make_sni(sni_name));
+            }
+
+            if may_send_sct_list {
+                exts.push(ClientExtension::SignedCertificateTimestampRequest);
+            }
+
+            if let Some(key_share) = &key_share {
+                debug_assert!(support_tls13);
+                let key_share = KeyShareEntry::new(key_share.group(), key_share.pubkey.as_ref());
+                exts.push(ClientExtension::KeyShare(vec![key_share]));
+            }
+
+            if let Some(cookie) = retryreq.and_then(HelloRetryRequest::get_cookie) {
+                exts.push(ClientExtension::Cookie(cookie.clone()));
+            }
+
+            if support_tls13 && config.enable_tickets {
+                // We could support PSK_KE here too. Such connections don't
+                // have forward secrecy, and are similar to TLS1.2 resumption.
+                let psk_modes = vec![PSKKeyExchangeMode::PSK_DHE_KE];
+                exts.push(ClientExtension::PresharedKeyModes(psk_modes));
+            }
+
+            if !config.alpn_protocols.is_empty() {
+                exts.push(ClientExtension::Protocols(ProtocolNameList::from_slices(
+                    &config
+                        .alpn_protocols
+                        .iter()
+                        .map(|proto| &proto[..])
+                        .collect::<Vec<_>>(),
                 )));
             }
-            None
-        } else {
-            None
-        };
-        (tls_client_session, exts)
+
+            // Extra extensions must be placed before the PSK extension
+            exts.extend(extra_exts.iter().cloned());
+
+            let tls_client_session = if support_tls13
+                && config.enable_tickets
+                && resume_version == ProtocolVersion::TLSv1_3
+                && !ticket.is_empty()
+            {
+                resuming_session
+                    .as_ref()
+                    .and_then(|resuming| match (suite, resuming.tls13()) {
+                        (Some(suite), Some(resuming)) => {
+                            suite
+                                .tls13()?
+                                .can_resume_from(resuming.suite())?;
+                            Some(resuming)
+                        }
+                        (None, Some(resuming)) => Some(resuming),
+                        _ => None,
+                    })
+                    .map(|resuming| {
+                        tls13::prepare_resumption(
+                            &config,
+                            cx,
+                            ticket,
+                            &resuming,
+                            &mut exts,
+                            retryreq.is_some(),
+                        );
+                        resuming
+                    })
+            } else if config.enable_tickets {
+                // If we have a ticket, include it.  Otherwise, request one.
+                exts.push(if ticket.is_empty() {
+                    ClientExtension::SessionTicket(ClientSessionTicket::Request)
+                } else {
+                    ClientExtension::SessionTicket(ClientSessionTicket::Offer(Payload::new(ticket)))
+                });
+                None
+            } else {
+                None
+            };
+            break (tls_client_session, exts);
+        }
     };
 
     // Note what extensions we sent.
@@ -490,9 +501,13 @@ fn emit_client_hello_for_retry(
         .collect();
 
     let session_id = session_id.unwrap_or_else(SessionID::empty);
-    let cipher_suites: Vec<_> = if let Some(ja3) = &config.ja3 {
-        ja3.ciphers.clone()
-    } else {
+
+    #[allow(clippy::never_loop)]
+    let cipher_suites: Vec<_> = loop {
+        #[cfg(feature = "yes3")]
+        if let Some(ja3) = &config.ja3 {
+            break ja3.ciphers.clone();
+        }
         let mut ciphers: Vec<CipherSuite> = config
             .cipher_suites
             .iter()
@@ -502,7 +517,7 @@ fn emit_client_hello_for_retry(
         // We don't do renegotiation at all, in fact.
         ciphers.push(CipherSuite::TLS_EMPTY_RENEGOTIATION_INFO_SCSV);
 
-        ciphers
+        break ciphers;
     };
 
     let mut chp = HandshakeMessagePayload {
