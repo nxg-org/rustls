@@ -369,7 +369,10 @@ fn emit_client_hello_for_retry(
                     }
                     x => {
                         #[cfg(feature = "logging")]
-                        crate::log::warn!("Probably non-clientside ExtensionType '{:?}' specified", x);
+                        crate::log::warn!(
+                            "Probably non-clientside ExtensionType '{:?}' specified",
+                            x
+                        );
                         // let's handle it like any other unknown one for now
                         ClientExtension::Unknown(crate::msgs::handshake::UnknownExtension {
                             typ: *x,

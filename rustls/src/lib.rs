@@ -255,7 +255,7 @@
 //! - `read_buf`: When building with Rust Nightly, adds support for the unstable
 //!   `std::io::ReadBuf` and related APIs. This reduces costs from initializing
 //!   buffers. Will do nothing on non-Nightly releases.
-//! 
+//!
 //! - `yes3`: (Try to) imitate Ja3 fingerprints
 
 // Require docs for public APIs, deny unsafe code, etc.

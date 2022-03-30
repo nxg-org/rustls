@@ -15,6 +15,13 @@ use crate::{
 #[derive(core::fmt::Debug)]
 pub struct Error;
 
+impl Display for Error {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.write_str("yes3 Error").unwrap();
+        Ok(())
+    }
+}
+
 impl<T: std::error::Error> From<T> for Error {
     fn from(_: T) -> Self {
         Error
@@ -78,7 +85,7 @@ impl FromStr for Ja3 {
         if parts[2].contains("11") && parts[4].is_empty() {
             return Err(Error);
         }
-        
+
         Ok(Self {
             ssl_versions: from_str!(u16; parts[0])?,
             ciphers: from_str!(u16; parts[1])?,
